@@ -1,3 +1,4 @@
+mod config;
 mod server;
 
 use dhcp4r::server as dhcp4rserver;
@@ -9,7 +10,10 @@ fn main() {
     let socket = UdpSocket::bind("0.0.0.0:67").unwrap();
     socket.set_broadcast(true).unwrap();
 
-    let srv = server::Server {};
+    let config = server::ServerConfig {
+        lease_start: Ipv4Addr::new(10, 41, 0, 0),
+    };
+    let srv = server::Server { config: config };
 
     dhcp4rserver::Server::serve(socket, SERVER_IP, srv);
 }
