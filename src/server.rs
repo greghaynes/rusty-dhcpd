@@ -8,14 +8,14 @@ use tokio::net::UdpSocket;
 use crate::config;
 
 #[derive(Debug)]
-enum HandleError {
+pub enum HandleError {
     IOError(std::io::Error),
     PacketError(),
 }
 
 impl std::fmt::Display for HandleError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
+        match &*self {
             HandleError::IOError(err) => write!(f, "IOError: {}", err),
             HandleError::PacketError() => write!(f, "Failed parsing packet"),
         }
@@ -29,14 +29,14 @@ impl From<std::io::Error> for HandleError {
 }
 
 #[derive(Debug)]
-enum ListenError {
+pub enum ListenError {
     BindError(TokioError),
     HandleError(HandleError),
 }
 
 impl std::fmt::Display for ListenError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
+        match &*self {
             ListenError::BindError(tokio_err) => write!(f, "Bind Error: {}", tokio_err),
             ListenError::HandleError(err) => write!(f, "Packet Receive Error: {}", err),
         }
@@ -59,6 +59,9 @@ pub struct LeaseBlock {
     max_leases: u32,
     last_lease: u32,
     lease_duration: Duration,
+    subnet_mask: Ipv4Addr,
+    routers: Vec<Ipv4Addr>,
+    domain_servers: Vec<Ipv4Addr>,
     leases: HashMap<Ipv4Addr, Lease>,
 }
 
@@ -89,37 +92,40 @@ impl Server {
             }
         }
 
-        let server = Server {
+        let mut server = Server {
             config: config.clone(),
             lease_block: LeaseBlock {
                 start_address: config.lease_start,
                 max_leases: config.lease_count,
                 last_lease: 0,
                 lease_duration: config.lease_duration,
+                subnet_mask: config.lease_subnet_mask,
+                routers: config.lease_routers.clone(),
+                domain_servers: config.lease_domain_servers.clone(),
                 leases: HashMap::new(),
             },
             socket: socket,
             out_buff: [0; 1500],
         };
 
-        match server.recv_loop(&server.socket).await {
+        match server.recv_loop().await {
             Err(err) => return Err(ListenError::HandleError(err)),
             Ok(()) => return Ok(()),
         }
     }
 
-    async fn recv_loop(&self, sock: &UdpSocket) -> Result<(), HandleError> {
+    async fn recv_loop(&mut self) -> Result<(), HandleError> {
         loop {
-            sock.readable().await?;
+            self.socket.readable().await?;
 
             let mut buf = [0; 1500];
 
-            match sock.try_recv_from(&mut buf) {
+            match self.socket.try_recv_from(&mut buf) {
                 Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buf[..n]) {
                     Err(err) => {
                         return Err(HandleError::PacketError());
                     }
-                    Ok(packet) => return self.handle_packet(&packet, &addr),
+                    Ok(packet) => return self.handle_packet(&packet, &addr).await,
                 },
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     continue;
@@ -133,8 +139,8 @@ impl Server {
         Ok(())
     }
 
-    fn handle_packet(
-        &self,
+    async fn handle_packet(
+        &mut self,
         packet: &dhcp4r::packet::Packet,
         src: &std::net::SocketAddr,
     ) -> Result<(), HandleError> {
@@ -144,12 +150,17 @@ impl Server {
                 if let Some(options::DhcpOption::RequestedIpAddress(addr)) =
                     packet.option(options::REQUESTED_IP_ADDRESS)
                 {
-                    if self.lease_block.available(&packet.chaddr, addr) {}
+                    if self.lease_block.available(&packet.chaddr, addr) {
+                        self.server_reply(src, options::MessageType::Offer, packet, &addr)
+                            .await;
+                    }
                 }
                 return Ok(());
             }
 
             Ok(options::MessageType::Request) => return Ok(()),
+
+            _ => return Ok(()),
         }
     }
 
@@ -171,7 +182,7 @@ impl Server {
         &mut self,
         src: &std::net::SocketAddr,
         msg_type: options::MessageType,
-        packet: packet::Packet,
+        packet: &packet::Packet,
         offer_ip: &Ipv4Addr,
         options: Vec<options::DhcpOption>,
     ) -> std::io::Result<usize> {
@@ -203,5 +214,70 @@ impl Server {
             },
         )
         .await
+    }
+
+    async fn server_reply(
+        &mut self,
+        src: &std::net::SocketAddr,
+        msg_type: options::MessageType,
+        packet: &packet::Packet,
+        offer_ip: &Ipv4Addr,
+    ) {
+        self.reply(
+            src,
+            msg_type,
+            packet,
+            offer_ip,
+            vec![
+                options::DhcpOption::IpAddressLeaseTime(
+                    self.lease_block.lease_duration.as_secs() as u32
+                ),
+                options::DhcpOption::SubnetMask(self.lease_block.subnet_mask),
+                options::DhcpOption::Router(self.lease_block.routers.clone()),
+                options::DhcpOption::DomainNameServer(self.lease_block.domain_servers.clone()),
+            ],
+        )
+        .await;
+    }
+
+    async fn nak(
+        &mut self,
+        src: &std::net::SocketAddr,
+        req_packet: &packet::Packet,
+        message: &str,
+    ) {
+        self.reply(
+            src,
+            options::MessageType::Nak,
+            req_packet,
+            &Ipv4Addr::new(0, 0, 0, 0),
+            vec![options::DhcpOption::Message(message.to_string())],
+        )
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Config;
+
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::time::Duration;
+
+    const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 40, 4, 122);
+    const SERVER_PORT: u16 = 8089;
+
+    #[test]
+    fn get_leases() {
+        let config = Config {
+            bind_address: SocketAddrV4::new(SERVER_IP, SERVER_PORT),
+            lease_start: Ipv4Addr::new(10, 41, 0, 0),
+            lease_count: 24,
+            lease_duration: Duration::from_secs(300),
+            lease_subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
+            lease_routers: vec![Ipv4Addr::new(10, 41, 1, 1)],
+            lease_domain_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
+        };
+        let srv = super::Server::serve(&config);
     }
 }
