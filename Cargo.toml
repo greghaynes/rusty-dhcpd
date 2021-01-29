@@ -9,4 +9,4 @@ edition = "2018"
 [dependencies]
 dhcp4r = "*"
 nom = "6.0.1"
-tokio = { version = "1.1.0", features = ["net"] }
+tokio = { version = "1.1.0", features = ["net", "macros", "rt", "sync", "time"] }

@@ -18,5 +18,5 @@ fn main() {
         lease_routers: vec![Ipv4Addr::new(10, 41, 1, 1)],
         lease_domain_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
     };
-    let srv = server::Server::serve(&config);
+    let srv = server::Server::create(&config);
 }
