@@ -1,5 +1,10 @@
 use dhcp4r::{options, packet};
+use nix::sys::socket::setsockopt;
+use nix::sys::socket::sockopt::BindToDevice;
+use nix::Error;
+use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
 use tokio::io::Error as TokioError;
 use tokio::net::UdpSocket;
@@ -36,6 +41,7 @@ impl From<std::io::Error> for HandleError {
 #[derive(Debug)]
 pub enum ListenError {
     BindError(TokioError),
+    BindInterfaceError(String),
     HandleError(HandleError),
 }
 
@@ -43,6 +49,9 @@ impl std::fmt::Display for ListenError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match &*self {
             ListenError::BindError(tokio_err) => write!(f, "Bind Error: {}", tokio_err),
+            ListenError::BindInterfaceError(interface) => {
+                write!(f, "Failed binding to interface: {}", interface)
+            }
             ListenError::HandleError(err) => write!(f, "Packet Receive Error: {}", err),
         }
     }
@@ -56,9 +65,7 @@ pub struct Server {
 
 impl Server {
     pub fn create(config: &config::Config, logger: slog::Logger) -> Server {
-        let srv_logger = logger.new(
-            o!("module" => "server")
-        );
+        let srv_logger = logger.new(o!("module" => "server"));
 
         return Server {
             config: config.clone(),
@@ -74,20 +81,62 @@ impl Server {
         };
     }
 
+    async fn create_socket(&self) -> Result<tokio::net::UdpSocket, ListenError> {
+        let logger = self.logger.new(o!("routine" => "create_socket"));
+        debug!(logger, "Creating socket");
+
+        let sock = match UdpSocket::bind(self.config.bind_address).await {
+            Err(err) => return Err(ListenError::BindError(err)),
+            Ok(s) => s,
+        };
+
+        sock.set_broadcast(true).unwrap();
+
+        debug!(
+            logger,
+            "Bound socket to address: {}", self.config.bind_address
+        );
+
+        match &self.config.bind_interface {
+            Some(interface) => {
+                let raw_fd = sock.as_raw_fd();
+                match setsockopt(raw_fd, BindToDevice, &OsString::from(interface)) {
+                    Err(err) => {
+                        error!(
+                            logger,
+                            "Failed to bind socket to interface ('{}'): {}",
+                            interface.to_string(),
+                            err
+                        );
+                        return Err(ListenError::BindInterfaceError(interface.to_string()));
+                    }
+                    Ok(_) => {
+                        debug!(
+                            logger,
+                            "Bound socket to interface: {}",
+                            interface.to_string()
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        return Ok(sock);
+    }
+
     pub async fn serve(&mut self, shutdown: Arc<Notify>) -> Result<(), ListenError> {
         info!(self.logger, "Serving");
-        match UdpSocket::bind(self.config.bind_address).await {
-            Err(err) => return Err(ListenError::BindError(err)),
-            Ok(sock) => match self.recv_loop(&sock, shutdown).await {
-                Err(err) => {
-                    error!(self.logger, "Error handling packet: {}", err);
-                    return Err(ListenError::HandleError(err));
-                },
-                Ok(()) => {
-                    debug!(self.logger, "Shutting down");
-                    return Ok(());
-                }
-            },
+        let sock = self.create_socket().await?;
+        match self.recv_loop(&sock, shutdown).await {
+            Err(err) => {
+                error!(self.logger, "Error handling packet: {}", err);
+                return Err(ListenError::HandleError(err));
+            }
+            Ok(()) => {
+                debug!(self.logger, "Shutting down");
+                return Ok(());
+            }
         }
     }
 
@@ -210,9 +259,11 @@ impl Server {
                 }
             }
 
-            _ => return {
-                warn!(logger, "Received unkonwn packet type");
-                Ok(())
+            _ => {
+                return {
+                    warn!(logger, "Received unkonwn packet type");
+                    Ok(())
+                }
             }
         }
     }
@@ -377,6 +428,7 @@ mod tests {
 
         let config = Config {
             bind_address: SocketAddrV4::new(SERVER_IP, SERVER_PORT),
+            bind_interface: None,
             lease_start: Ipv4Addr::new(10, 41, 0, 0),
             lease_count: 24,
             lease_duration: Duration::from_secs(300),
@@ -425,9 +477,7 @@ mod tests {
         // Get discover response
         match client_sock.recv_from(buff).await {
             Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
-                Err(_) => {
-                    assert!(false, "Failed to parse discover response")
-                }
+                Err(_) => assert!(false, "Failed to parse discover response"),
                 Ok(packet) => {
                     assert_eq!(packet.yiaddr, Ipv4Addr::new(10, 41, 0, 0));
                 }
@@ -437,7 +487,11 @@ mod tests {
 
         // Send request
         let mut req_packet = requestPacket();
-        req_packet.options.push(dhcp4r::options::DhcpOption::RequestedIpAddress(Ipv4Addr::new(10, 41, 0, 0)));
+        req_packet
+            .options
+            .push(dhcp4r::options::DhcpOption::RequestedIpAddress(
+                Ipv4Addr::new(10, 41, 0, 0),
+            ));
         req_packet.encode(buff);
         match client_sock
             .send_to(buff, std::net::SocketAddrV4::new(SERVER_IP, SERVER_PORT))
@@ -450,9 +504,7 @@ mod tests {
         // Got request response
         match client_sock.recv_from(buff).await {
             Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
-                Err(_) => {
-                    assert!(false, "Failed to parse request response")
-                }
+                Err(_) => assert!(false, "Failed to parse request response"),
                 Ok(packet) => {
                     assert_eq!(packet.yiaddr, Ipv4Addr::new(10, 41, 0, 0));
                 }

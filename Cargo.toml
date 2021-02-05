@@ -8,8 +8,9 @@ edition = "2018"
 
 [dependencies]
 dhcp4r = "*"
+nix = "0.19.1"
 nom = "6.0.1"
 slog = "2.7.0"
 slog-async = "2.6.0"
 slog-term = "2.6.0"
-tokio = { version = "1.1.0", features = ["net", "macros", "rt", "sync", "time"] }
+tokio = { version = "1.1.0", features = ["net", "macros", "rt", "rt-multi-thread", "sync", "time"] }
