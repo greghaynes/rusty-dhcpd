@@ -324,8 +324,26 @@ mod tests {
         };
     }
 
+    fn requestPacket() -> dhcp4r::packet::Packet {
+        return dhcp4r::packet::Packet {
+            reply: false,
+            hops: 0,
+            xid: 1234,
+            secs: 3600,
+            broadcast: true,
+            ciaddr: CLIENT_IP,
+            yiaddr: Ipv4Addr::new(0, 0, 0, 0),
+            siaddr: Ipv4Addr::new(0, 0, 0, 0),
+            giaddr: Ipv4Addr::new(0, 0, 0, 0),
+            chaddr: *CLIENT_HWADDR,
+            options: vec![dhcp4r::options::DhcpOption::DhcpMessageType(
+                dhcp4r::options::MessageType::Request,
+            )],
+        };
+    }
+
     #[tokio::test]
-    async fn get_leases() {
+    async fn get_lease() {
         let config = Config {
             bind_address: SocketAddrV4::new(SERVER_IP, SERVER_PORT),
             lease_start: Ipv4Addr::new(10, 41, 0, 0),
@@ -375,8 +393,39 @@ mod tests {
 
         // Get discover response
         match client_sock.recv_from(buff).await {
-            Ok(_) => println!("Got response"),
+            Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
+                Err(_) => {
+                    assert!(false, "Failed to parse discover response")
+                }
+                Ok(packet) => {
+                    assert_eq!(packet.yiaddr, Ipv4Addr::new(10, 41, 0, 0));
+                }
+            },
             Err(err) => assert!(false, "Discover response: {}", err),
+        }
+
+        // Send request
+        let buff: &mut [u8; 1500] = &mut [0; 1500];
+        requestPacket().encode(buff);
+        match client_sock
+            .send_to(buff, std::net::SocketAddrV4::new(SERVER_IP, SERVER_PORT))
+            .await
+        {
+            Ok(_) => println!("Sent request"),
+            Err(err) => assert!(false, "Sending request: {}", err),
+        }
+
+        // Got request response
+        match client_sock.recv_from(buff).await {
+            Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
+                Err(_) => {
+                    assert!(false, "Failed to parse request response")
+                }
+                Ok(packet) => {
+                    assert_eq!(packet.yiaddr, Ipv4Addr::new(10, 41, 0, 0));
+                }
+            },
+            Err(err) => assert!(false, "Request response: {}", err),
         }
 
         // Start shutdown
