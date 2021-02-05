@@ -1,6 +1,7 @@
 use dhcp4r::{options, packet};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use tokio::io::Error as TokioError;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
@@ -51,7 +52,6 @@ impl std::fmt::Display for ListenError {
 pub struct Server {
     config: config::Config,
     lease_block: leases::LeaseBlock,
-    stop_notify: Notify,
 }
 
 impl Server {
@@ -66,25 +66,24 @@ impl Server {
                 config.lease_routers.clone(),
                 config.lease_domain_servers.clone(),
             ),
-            stop_notify: Notify::new(),
         };
     }
 
-    pub async fn serve(&self) -> Result<(), ListenError> {
+    pub async fn serve(&mut self, shutdown: Arc<Notify>) -> Result<(), ListenError> {
         match UdpSocket::bind(self.config.bind_address).await {
             Err(err) => return Err(ListenError::BindError(err)),
-            Ok(sock) => match self.recv_loop(&sock).await {
+            Ok(sock) => match self.recv_loop(&sock, shutdown).await {
                 Err(err) => return Err(ListenError::HandleError(err)),
                 Ok(()) => return Ok(()),
             },
         }
     }
 
-    pub async fn stop(&self) {
-        self.stop_notify.notify_one();
-    }
-
-    async fn recv_loop(&self, socket: &tokio::net::UdpSocket) -> Result<(), HandleError> {
+    async fn recv_loop(
+        &mut self,
+        socket: &tokio::net::UdpSocket,
+        shutdown: Arc<Notify>,
+    ) -> Result<(), HandleError> {
         loop {
             let mut buf = [0; 1500];
 
@@ -105,7 +104,7 @@ impl Server {
                         }
                     }
                 },
-                _ = self.stop_notify.notified() => {
+                _ = shutdown.notified() => {
                     return Ok(())
                 }
             }
@@ -113,12 +112,13 @@ impl Server {
     }
 
     async fn handle_packet(
-        &self,
+        &mut self,
         socket: &tokio::net::UdpSocket,
         packet: &dhcp4r::packet::Packet,
         src: &std::net::SocketAddr,
     ) -> Result<(), HandleError> {
         match packet.message_type() {
+            // DISCOVER
             Ok(options::MessageType::Discover) => {
                 // Client requested an address
                 if let Some(options::DhcpOption::RequestedIpAddress(addr)) =
@@ -156,23 +156,36 @@ impl Server {
                 }
             }
 
+            // REQUEST
             Ok(options::MessageType::Request) => {
+                // Use request IP if specified, otherwise client IP
                 let req_ip = match packet.option(options::REQUESTED_IP_ADDRESS) {
-                    Some(options::DhcpOption::RequestedIpAddress(x)) => *x,
+                    Some(options::DhcpOption::RequestedIpAddress(ip)) => *ip,
                     _ => packet.ciaddr,
                 };
 
-                if !self.lease_block.available(&packet.chaddr, &req_ip).await {
-                    match self
-                        .nak(socket, src, packet, "Requested IP not available.")
-                        .await
-                    {
-                        Ok(_) => return Ok(()),
-                        Err(_) => return Err(HandleError::FailedSendingReply()),
+                match self.lease_block.reserve(&packet.chaddr, &req_ip).await {
+                    Ok(_) => {
+                        // We got a lease, send an ACK
+                        match self
+                            .server_reply(socket, src, options::MessageType::Ack, packet, &req_ip)
+                            .await
+                        {
+                            Ok(_) => return Ok(()),
+                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                        }
+                    }
+                    Err(_) => {
+                        // Failed to get lease, send a NAK
+                        match self
+                            .nak(socket, src, packet, "Requested IP not available.")
+                            .await
+                        {
+                            Ok(_) => return Ok(()),
+                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                        }
                     }
                 }
-
-                Ok(())
             }
 
             _ => return Ok(()),
@@ -283,7 +296,9 @@ mod tests {
     use crate::config::Config;
 
     use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     const SERVER_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
     const SERVER_PORT: u16 = 8998;
@@ -321,12 +336,14 @@ mod tests {
             lease_domain_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
         };
 
-        let srv = std::sync::Arc::new(super::Server::create(&config));
+        let shutdown = Arc::new(Notify::new());
 
-        // Start server in background
-        let srv_bg = srv.clone();
+        // background shutdown handle
+        let shutdown_bg = shutdown.clone();
+
         let srv_handle = tokio::spawn(async move {
-            match srv_bg.serve().await {
+            let mut srv = super::Server::create(&config);
+            match srv.serve(shutdown_bg).await {
                 Ok(_) => {}
                 Err(err) => assert!(false, "Failed to run server: {}", err),
             }
@@ -363,7 +380,7 @@ mod tests {
         }
 
         // Start shutdown
-        srv.stop().await;
+        shutdown.notify_one();
         // Wait until shutdown happens
         match srv_handle.await {
             Ok(_) => assert!(true, "Server success"),

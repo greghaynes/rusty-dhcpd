@@ -52,6 +52,35 @@ impl LeaseBlockState {
             None => return true,
         }
     }
+
+    fn reserve(
+        &mut self,
+        chaddr: &[u8; 6],
+        addr: &Ipv4Addr,
+        duration: Duration,
+    ) -> Result<(), LeaseError> {
+        if !self.available(chaddr, addr) {
+            return Err(LeaseError::AddressUnavailabe());
+        }
+
+        match self.lease_by_ip.get_mut(addr) {
+            Some(lease) => {
+                lease.expires = Instant::now() + duration;
+            }
+            None => {
+                self.lease_by_ip.insert(
+                    *addr,
+                    Lease {
+                        chaddr: *chaddr,
+                        expires: Instant::now() + duration,
+                    },
+                );
+            }
+        }
+
+        self.ip_by_chaddr.insert(*chaddr, *addr);
+        Ok(())
+    }
 }
 
 /// Operations on a contiguous set of IP addresses which are used for leases
@@ -127,8 +156,9 @@ impl LeaseBlock {
         }
     }
 
-    pub fn reserve(&self, chaddr: &[u8; 6], addr: &Ipv4Addr) -> Result<(), LeaseError> {
-        Ok(())
+    pub async fn reserve(&mut self, chaddr: &[u8; 6], addr: &Ipv4Addr) -> Result<(), LeaseError> {
+        let mut state_guard = self.state.write().await;
+        return state_guard.reserve(chaddr, addr, self.lease_duration);
     }
 
     pub fn release(&self, chaddr: &[u8; 6], addr: &Ipv4Addr) -> Result<(), LeaseError> {
