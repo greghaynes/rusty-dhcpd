@@ -1,5 +1,4 @@
 use dhcp4r::{options, packet};
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::io::Error as TokioError;
@@ -52,10 +51,15 @@ impl std::fmt::Display for ListenError {
 pub struct Server {
     config: config::Config,
     lease_block: leases::LeaseBlock,
+    logger: slog::Logger,
 }
 
 impl Server {
-    pub fn create(config: &config::Config) -> Server {
+    pub fn create(config: &config::Config, logger: slog::Logger) -> Server {
+        let srv_logger = logger.new(
+            o!("module" => "server")
+        );
+
         return Server {
             config: config.clone(),
             lease_block: leases::LeaseBlock::create(
@@ -66,15 +70,23 @@ impl Server {
                 config.lease_routers.clone(),
                 config.lease_domain_servers.clone(),
             ),
+            logger: srv_logger,
         };
     }
 
     pub async fn serve(&mut self, shutdown: Arc<Notify>) -> Result<(), ListenError> {
+        info!(self.logger, "Serving");
         match UdpSocket::bind(self.config.bind_address).await {
             Err(err) => return Err(ListenError::BindError(err)),
             Ok(sock) => match self.recv_loop(&sock, shutdown).await {
-                Err(err) => return Err(ListenError::HandleError(err)),
-                Ok(()) => return Ok(()),
+                Err(err) => {
+                    error!(self.logger, "Error handling packet: {}", err);
+                    return Err(ListenError::HandleError(err));
+                },
+                Ok(()) => {
+                    debug!(self.logger, "Shutting down");
+                    return Ok(());
+                }
             },
         }
     }
@@ -84,27 +96,34 @@ impl Server {
         socket: &tokio::net::UdpSocket,
         shutdown: Arc<Notify>,
     ) -> Result<(), HandleError> {
+        let logger = self.logger.new(o!("routine" => "recv_loop"));
         loop {
             let mut buf = [0; 1500];
-
+            debug!(logger, "Waiting for packet");
             tokio::select! {
                 _ = socket.readable() => {
                     match socket.try_recv_from(&mut buf) {
                         Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buf[..n]) {
-                            Err(_) => {
+                            Err(e) => {
+                                info!(logger, "Failed parsing received packet");
                                 return Err(HandleError::PacketError());
                             }
-                            Ok(packet) => return self.handle_packet(socket, &packet, &addr).await,
+                            Ok(packet) => {
+                                debug!(logger, "Got valid DHCP packet");
+                                self.handle_packet(socket, &packet, &addr).await?;
+                            },
                         },
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             continue;
                         }
                         Err(e) => {
+                            warn!(logger, "Error while reading from socket: {}", e);
                             return Err(HandleError::IOError(e));
                         }
                     }
                 },
                 _ = shutdown.notified() => {
+                    info!(logger, "Shutting down");
                     return Ok(())
                 }
             }
@@ -117,9 +136,11 @@ impl Server {
         packet: &dhcp4r::packet::Packet,
         src: &std::net::SocketAddr,
     ) -> Result<(), HandleError> {
+        let logger = self.logger.new(o!("routine" => "handle_packet"));
         match packet.message_type() {
             // DISCOVER
             Ok(options::MessageType::Discover) => {
+                info!(logger, "Got DISCOVER");
                 // Client requested an address
                 if let Some(options::DhcpOption::RequestedIpAddress(addr)) =
                     packet.option(options::REQUESTED_IP_ADDRESS)
@@ -158,6 +179,7 @@ impl Server {
 
             // REQUEST
             Ok(options::MessageType::Request) => {
+                info!(logger, "Got REQUEST");
                 // Use request IP if specified, otherwise client IP
                 let req_ip = match packet.option(options::REQUESTED_IP_ADDRESS) {
                     Some(options::DhcpOption::RequestedIpAddress(ip)) => *ip,
@@ -188,7 +210,10 @@ impl Server {
                 }
             }
 
-            _ => return Ok(()),
+            _ => return {
+                warn!(logger, "Received unkonwn packet type");
+                Ok(())
+            }
         }
     }
 
@@ -295,6 +320,7 @@ impl Server {
 mod tests {
     use crate::config::Config;
 
+    use slog::Drain;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::Arc;
     use std::time::Duration;
@@ -344,6 +370,11 @@ mod tests {
 
     #[tokio::test]
     async fn get_lease() {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+        let logger = slog::Logger::root(drain, o!());
+
         let config = Config {
             bind_address: SocketAddrV4::new(SERVER_IP, SERVER_PORT),
             lease_start: Ipv4Addr::new(10, 41, 0, 0),
@@ -360,7 +391,7 @@ mod tests {
         let shutdown_bg = shutdown.clone();
 
         let srv_handle = tokio::spawn(async move {
-            let mut srv = super::Server::create(&config);
+            let mut srv = super::Server::create(&config, logger);
             match srv.serve(shutdown_bg).await {
                 Ok(_) => {}
                 Err(err) => assert!(false, "Failed to run server: {}", err),
@@ -405,8 +436,9 @@ mod tests {
         }
 
         // Send request
-        let buff: &mut [u8; 1500] = &mut [0; 1500];
-        requestPacket().encode(buff);
+        let mut req_packet = requestPacket();
+        req_packet.options.push(dhcp4r::options::DhcpOption::RequestedIpAddress(Ipv4Addr::new(10, 41, 0, 0)));
+        req_packet.encode(buff);
         match client_sock
             .send_to(buff, std::net::SocketAddrV4::new(SERVER_IP, SERVER_PORT))
             .await

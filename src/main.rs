@@ -2,6 +2,11 @@ mod config;
 mod leases;
 mod server;
 
+#[macro_use]
+extern crate slog;
+extern crate slog_term;
+extern crate slog_async;
+
 use dhcp4r::server as dhcp4rserver;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
@@ -19,5 +24,5 @@ fn main() {
         lease_routers: vec![Ipv4Addr::new(10, 41, 1, 1)],
         lease_domain_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
     };
-    let srv = server::Server::create(&config);
+    //let srv = server::Server::create(&config);
 }
