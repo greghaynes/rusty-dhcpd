@@ -1,4 +1,5 @@
 mod config;
+mod leases;
 mod server;
 
 use dhcp4r::server as dhcp4rserver;

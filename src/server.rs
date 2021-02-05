@@ -1,17 +1,19 @@
 use dhcp4r::{options, packet};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::{Duration, Instant};
 use tokio::io::Error as TokioError;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 
 use crate::config;
+use crate::leases;
 
 #[derive(Debug)]
 pub enum HandleError {
     IOError(std::io::Error),
     PacketError(),
+    NoAvailableLease(),
+    FailedSendingReply(),
 }
 
 impl std::fmt::Display for HandleError {
@@ -19,6 +21,8 @@ impl std::fmt::Display for HandleError {
         match &*self {
             HandleError::IOError(err) => write!(f, "IOError: {}", err),
             HandleError::PacketError() => write!(f, "Failed parsing packet"),
+            HandleError::NoAvailableLease() => write!(f, "No leases available"),
+            HandleError::FailedSendingReply() => write!(f, "Failed to send reply packet"),
         }
     }
 }
@@ -44,40 +48,9 @@ impl std::fmt::Display for ListenError {
     }
 }
 
-pub struct Lease {
-    chaddr: [u8; 6],
-    expires: Instant,
-}
-
-impl Lease {
-    pub fn expired(&self) -> bool {
-        return self.expires <= Instant::now();
-    }
-}
-
-pub struct LeaseBlock {
-    start_address: Ipv4Addr,
-    max_leases: u32,
-    last_lease: u32,
-    lease_duration: Duration,
-    subnet_mask: Ipv4Addr,
-    routers: Vec<Ipv4Addr>,
-    domain_servers: Vec<Ipv4Addr>,
-    leases: HashMap<Ipv4Addr, Lease>,
-}
-
-impl LeaseBlock {
-    pub fn available(&self, chaddr: &[u8; 6], addr: &Ipv4Addr) -> bool {
-        match self.leases.get(addr) {
-            Some(lease) => return !lease.expired(),
-            None => return false,
-        }
-    }
-}
-
 pub struct Server {
     config: config::Config,
-    lease_block: LeaseBlock,
+    lease_block: leases::LeaseBlock,
     stop_notify: Notify,
 }
 
@@ -85,16 +58,14 @@ impl Server {
     pub fn create(config: &config::Config) -> Server {
         return Server {
             config: config.clone(),
-            lease_block: LeaseBlock {
-                start_address: config.lease_start,
-                max_leases: config.lease_count,
-                last_lease: 0,
-                lease_duration: config.lease_duration,
-                subnet_mask: config.lease_subnet_mask,
-                routers: config.lease_routers.clone(),
-                domain_servers: config.lease_domain_servers.clone(),
-                leases: HashMap::new(),
-            },
+            lease_block: leases::LeaseBlock::create(
+                config.lease_start,
+                config.lease_count,
+                config.lease_duration,
+                config.lease_subnet_mask,
+                config.lease_routers.clone(),
+                config.lease_domain_servers.clone(),
+            ),
             stop_notify: Notify::new(),
         };
     }
@@ -149,21 +120,60 @@ impl Server {
     ) -> Result<(), HandleError> {
         match packet.message_type() {
             Ok(options::MessageType::Discover) => {
-                println!("Got discover!");
-
                 // Client requested an address
                 if let Some(options::DhcpOption::RequestedIpAddress(addr)) =
                     packet.option(options::REQUESTED_IP_ADDRESS)
                 {
-                    if self.lease_block.available(&packet.chaddr, addr) {
-                        self.server_reply(socket, src, options::MessageType::Offer, packet, &addr)
-                            .await;
+                    if self.lease_block.available(&packet.chaddr, addr).await {
+                        match self
+                            .server_reply(socket, src, options::MessageType::Offer, packet, &addr)
+                            .await
+                        {
+                            Ok(_) => return Ok(()),
+                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                        }
                     }
                 }
-                return Ok(());
+
+                // No address requested or requested address unavailable
+                match self.lease_block.get_available(&packet.chaddr).await {
+                    Some(address) => {
+                        match self
+                            .server_reply(
+                                socket,
+                                src,
+                                options::MessageType::Offer,
+                                packet,
+                                &address,
+                            )
+                            .await
+                        {
+                            Ok(_) => return Ok(()),
+                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                        }
+                    }
+                    None => return Err(HandleError::NoAvailableLease()),
+                }
             }
 
-            Ok(options::MessageType::Request) => return Ok(()),
+            Ok(options::MessageType::Request) => {
+                let req_ip = match packet.option(options::REQUESTED_IP_ADDRESS) {
+                    Some(options::DhcpOption::RequestedIpAddress(x)) => *x,
+                    _ => packet.ciaddr,
+                };
+
+                if !self.lease_block.available(&packet.chaddr, &req_ip).await {
+                    match self
+                        .nak(socket, src, packet, "Requested IP not available.")
+                        .await
+                    {
+                        Ok(_) => return Ok(()),
+                        Err(_) => return Err(HandleError::FailedSendingReply()),
+                    }
+                }
+
+                Ok(())
+            }
 
             _ => return Ok(()),
         }
@@ -250,7 +260,7 @@ impl Server {
     }
 
     async fn nak(
-        &mut self,
+        &self,
         socket: &tokio::net::UdpSocket,
         src: &std::net::SocketAddr,
         req_packet: &packet::Packet,
@@ -282,7 +292,7 @@ mod tests {
     const CLIENT_HWADDR: &[u8; 6] = b"000000";
 
     fn discoverPacket() -> dhcp4r::packet::Packet {
-        return dhcp4r::packet::Packet{
+        return dhcp4r::packet::Packet {
             reply: false,
             hops: 0,
             xid: 1234,
@@ -293,12 +303,10 @@ mod tests {
             siaddr: Ipv4Addr::new(0, 0, 0, 0),
             giaddr: Ipv4Addr::new(0, 0, 0, 0),
             chaddr: *CLIENT_HWADDR,
-            options: vec!(
-                dhcp4r::options::DhcpOption::DhcpMessageType(
-                    dhcp4r::options::MessageType::Discover
-                ),
-            ),
-        }
+            options: vec![dhcp4r::options::DhcpOption::DhcpMessageType(
+                dhcp4r::options::MessageType::Discover,
+            )],
+        };
     }
 
     #[tokio::test]
@@ -319,16 +327,17 @@ mod tests {
         let srv_bg = srv.clone();
         let srv_handle = tokio::spawn(async move {
             match srv_bg.serve().await {
-                Ok(_) => { },
-                Err(err) => { assert!(false, "Failed to run server: {}", err) }
+                Ok(_) => {}
+                Err(err) => assert!(false, "Failed to run server: {}", err),
             }
         });
 
+        // Wait for server to start
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
         // Create client socket
         let client_sock: tokio::net::UdpSocket;
-        match tokio::net::UdpSocket::bind(
-            SocketAddrV4::new(CLIENT_IP, CLIENT_PORT)
-        ).await {
+        match tokio::net::UdpSocket::bind(SocketAddrV4::new(CLIENT_IP, CLIENT_PORT)).await {
             Ok(sock) => client_sock = sock,
             Err(err) => {
                 assert!(false, "Failed to make client socket: {}", err);
@@ -337,24 +346,28 @@ mod tests {
         }
 
         // Send discover
-        let out_buff: &mut [u8; 1500] = &mut [0; 1500];
-        discoverPacket().encode(out_buff);
-        match client_sock.send_to(
-            out_buff,
-            std::net::SocketAddrV4::new(SERVER_IP, SERVER_PORT),
-        ).await {
-            Ok(_) => { println!("Sent discover") },
-            Err(err) => { assert!(false, "Sending discover: {}", err) }
+        let buff: &mut [u8; 1500] = &mut [0; 1500];
+        discoverPacket().encode(buff);
+        match client_sock
+            .send_to(buff, std::net::SocketAddrV4::new(SERVER_IP, SERVER_PORT))
+            .await
+        {
+            Ok(_) => println!("Sent discover"),
+            Err(err) => assert!(false, "Sending discover: {}", err),
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Get discover response
+        match client_sock.recv_from(buff).await {
+            Ok(_) => println!("Got response"),
+            Err(err) => assert!(false, "Discover response: {}", err),
+        }
 
         // Start shutdown
         srv.stop().await;
         // Wait until shutdown happens
         match srv_handle.await {
-            Ok(_) => { assert!(true, "Server success") },
-            Err(err) => { assert!(false, "Failed when running server: {}", err) },
+            Ok(_) => assert!(true, "Server success"),
+            Err(err) => assert!(false, "Failed when running server: {}", err),
         }
     }
 }
