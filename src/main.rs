@@ -24,11 +24,11 @@ async fn main() {
     let config = config::Config {
         bind_address: SocketAddrV4::new(SERVER_IP, SERVER_PORT),
         bind_interface: Some("dhcp-server-if".to_string()),
-        lease_start: Ipv4Addr::new(10, 41, 0, 0),
+        lease_start: Ipv4Addr::new(10, 60, 0, 10),
         lease_count: 24,
         lease_duration: Duration::from_secs(300),
         lease_subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
-        lease_routers: vec![Ipv4Addr::new(10, 41, 1, 1)],
+        lease_routers: vec![Ipv4Addr::new(10, 60, 0, 1)],
         lease_domain_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
     };
 

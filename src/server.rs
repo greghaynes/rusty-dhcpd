@@ -189,25 +189,36 @@ impl Server {
         match packet.message_type() {
             // DISCOVER
             Ok(options::MessageType::Discover) => {
-                info!(logger, "Got DISCOVER");
+                let mut discover_logger = logger.new(o!("message_type" => "discover"));
+                debug!(discover_logger, "Got DISCOVER");
                 // Client requested an address
                 if let Some(options::DhcpOption::RequestedIpAddress(addr)) =
                     packet.option(options::REQUESTED_IP_ADDRESS)
                 {
+                    discover_logger = discover_logger.new(o!("requested_address" => addr.to_string()));
                     if self.lease_block.available(&packet.chaddr, addr).await {
+                        debug!(discover_logger, "Got discover for existing lease which is valid for this client");
                         match self
                             .server_reply(socket, src, options::MessageType::Offer, packet, &addr)
                             .await
                         {
-                            Ok(_) => return Ok(()),
-                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                            Ok(_) => {
+                                debug!(discover_logger, "Sent offer");
+                                return Ok(());
+                            },
+                            Err(_) => {
+                                debug!(discover_logger, "Failed sending offer");
+                                return Err(HandleError::FailedSendingReply());
+                            }
                         }
                     }
                 }
 
-                // No address requested or requested address unavailable
+                debug!(discover_logger, "No address requested or requested address unavailable");
                 match self.lease_block.get_available(&packet.chaddr).await {
                     Some(address) => {
+                        discover_logger = discover_logger.new(o!("offer_address" => address.to_string()));
+                        debug!(discover_logger, "Found address to offer");
                         match self
                             .server_reply(
                                 socket,
@@ -218,8 +229,14 @@ impl Server {
                             )
                             .await
                         {
-                            Ok(_) => return Ok(()),
-                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                            Ok(_) => {
+                                debug!(discover_logger, "Offer sent");
+                                return Ok(());
+                            },
+                            Err(_) => {
+                                debug!(discover_logger, "Failed to send offer");
+                                return Err(HandleError::FailedSendingReply());
+                            }
                         }
                     }
                     None => return Err(HandleError::NoAvailableLease()),
@@ -228,22 +245,30 @@ impl Server {
 
             // REQUEST
             Ok(options::MessageType::Request) => {
-                info!(logger, "Got REQUEST");
                 // Use request IP if specified, otherwise client IP
                 let req_ip = match packet.option(options::REQUESTED_IP_ADDRESS) {
                     Some(options::DhcpOption::RequestedIpAddress(ip)) => *ip,
                     _ => packet.ciaddr,
                 };
+                let request_logger = logger.new(o!("client_ip" => req_ip.to_string(), "message_type" => "request"));
+                debug!(request_logger, "Got REQUEST");
 
                 match self.lease_block.reserve(&packet.chaddr, &req_ip).await {
                     Ok(_) => {
+                        info!(request_logger, "Reserved lease");
                         // We got a lease, send an ACK
                         match self
                             .server_reply(socket, src, options::MessageType::Ack, packet, &req_ip)
                             .await
                         {
-                            Ok(_) => return Ok(()),
-                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                            Ok(_) => {
+                                debug!(request_logger, "Sent ACK");
+                                return Ok(());
+                            },
+                            Err(_) => {
+                                debug!(request_logger, "Failed sending ACK");
+                                return Err(HandleError::FailedSendingReply());
+                            }
                         }
                     }
                     Err(_) => {
@@ -299,8 +324,9 @@ impl Server {
         let mut opts: Vec<options::DhcpOption> = Vec::with_capacity(options.len() + 2);
         opts.push(options::DhcpOption::DhcpMessageType(msg_type));
         opts.push(options::DhcpOption::ServerIdentifier(
-            *self.config.bind_address.ip(),
+            Ipv4Addr::new(10, 60, 0, 1),
         ));
+        opts.extend(options);
 
         self.send(
             socket,
