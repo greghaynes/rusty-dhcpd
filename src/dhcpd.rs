@@ -59,7 +59,7 @@ impl std::fmt::Display for ListenError {
 }
 
 #[async_trait]
-pub trait AbstractServer {
+pub trait AbstractServer : Send + Sync {
     async fn leases(&self) -> HashMap<Ipv4Addr, leases::Lease>;
 }
 

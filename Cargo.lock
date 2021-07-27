@@ -199,7 +199,9 @@ dependencies = [
 
 [[package]]
 name = "dhcp4r"
-version = "0.2.1"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cdd1c73c129e0926d1c956834c7da0e084e5d971171555c21a5fc98e208585d"
 dependencies = [
  "enum-primitive-derive",
  "nom",
