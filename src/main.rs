@@ -55,10 +55,11 @@ async fn main() {
     let dhcp_shutdown = Arc::new(tokio::sync::Notify::new());
 
     let dhcp_srv = Arc::new(dhcpd::Server::create(&config, logger));
+    let dhcp_srv_web = dhcp_srv.clone();
 
     let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
     
-    let dhcp_srv_filter = warp::any().map(move || -> Arc<dyn dhcpd::AbstractServer> {dhcp_srv.clone()});
+    let dhcp_srv_filter = warp::any().map(move || -> Arc<dyn dhcpd::AbstractServer> {dhcp_srv_web.clone()});
     let leases = warp::path("leases")
         .and(dhcp_srv_filter)
         .and_then(web::leases_handler);
