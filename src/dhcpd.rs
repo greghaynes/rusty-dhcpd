@@ -1,10 +1,11 @@
+use async_trait::async_trait;
 use dhcp4r::{options, packet};
 use nix::sys::socket::setsockopt;
 use nix::sys::socket::sockopt::BindToDevice;
-use nix::Error;
+use std::collections::HashMap;
 use std::ffi::OsString;
-use std::net::{IpAddr, Ipv4Addr};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio::io::Error as TokioError;
 use tokio::net::UdpSocket;
@@ -57,10 +58,22 @@ impl std::fmt::Display for ListenError {
     }
 }
 
+#[async_trait]
+pub trait AbstractServer : Send + Sync {
+    async fn leases(&self) -> HashMap<Ipv4Addr, leases::Lease>;
+}
+
 pub struct Server {
     config: config::Config,
     lease_block: leases::LeaseBlock,
     logger: slog::Logger,
+}
+
+#[async_trait]
+impl AbstractServer for Server {
+    async fn leases(&self) -> HashMap<Ipv4Addr, leases::Lease> {
+        return self.lease_block.leases().await;
+    }
 }
 
 impl Server {
@@ -85,7 +98,12 @@ impl Server {
         let logger = self.logger.new(o!("routine" => "create_socket"));
         debug!(logger, "Creating socket");
 
-        let sock = match UdpSocket::bind(self.config.bind_address).await {
+        let sock = match UdpSocket::bind(SocketAddrV4::new(
+            Ipv4Addr::new(0, 0, 0, 0),
+            self.config.listen_port,
+        ))
+        .await
+        {
             Err(err) => return Err(ListenError::BindError(err)),
             Ok(s) => s,
         };
@@ -94,7 +112,7 @@ impl Server {
 
         debug!(
             logger,
-            "Bound socket to address: {}", self.config.bind_address
+            "Bound socket to address: 0.0.0.0:{}", self.config.listen_port
         );
 
         match &self.config.bind_interface {
@@ -125,7 +143,7 @@ impl Server {
         return Ok(sock);
     }
 
-    pub async fn serve(&mut self, shutdown: Arc<Notify>) -> Result<(), ListenError> {
+    pub async fn serve(&self, shutdown: Arc<Notify>) -> Result<(), ListenError> {
         info!(self.logger, "Serving");
         let sock = self.create_socket().await?;
         match self.recv_loop(&sock, shutdown).await {
@@ -141,7 +159,7 @@ impl Server {
     }
 
     async fn recv_loop(
-        &mut self,
+        &self,
         socket: &tokio::net::UdpSocket,
         shutdown: Arc<Notify>,
     ) -> Result<(), HandleError> {
@@ -180,7 +198,7 @@ impl Server {
     }
 
     async fn handle_packet(
-        &mut self,
+        &self,
         socket: &tokio::net::UdpSocket,
         packet: &dhcp4r::packet::Packet,
         src: &std::net::SocketAddr,
@@ -189,25 +207,44 @@ impl Server {
         match packet.message_type() {
             // DISCOVER
             Ok(options::MessageType::Discover) => {
-                info!(logger, "Got DISCOVER");
+                let mut discover_logger = logger.new(o!("message type" => "discover"));
+                debug!(discover_logger, "Got DISCOVER");
                 // Client requested an address
                 if let Some(options::DhcpOption::RequestedIpAddress(addr)) =
                     packet.option(options::REQUESTED_IP_ADDRESS)
                 {
+                    discover_logger =
+                        discover_logger.new(o!("requested address" => addr.to_string()));
                     if self.lease_block.available(&packet.chaddr, addr).await {
+                        debug!(
+                            discover_logger,
+                            "Got discover for existing lease which is valid for this client"
+                        );
                         match self
                             .server_reply(socket, src, options::MessageType::Offer, packet, &addr)
                             .await
                         {
-                            Ok(_) => return Ok(()),
-                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                            Ok(_) => {
+                                debug!(discover_logger, "Sent offer");
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                debug!(discover_logger, "Failed sending offer");
+                                return Err(HandleError::FailedSendingReply());
+                            }
                         }
                     }
                 }
 
-                // No address requested or requested address unavailable
+                debug!(
+                    discover_logger,
+                    "No address requested or requested address unavailable"
+                );
                 match self.lease_block.get_available(&packet.chaddr).await {
                     Some(address) => {
+                        discover_logger =
+                            discover_logger.new(o!("offer address" => address.to_string()));
+                        debug!(discover_logger, "Found address to offer");
                         match self
                             .server_reply(
                                 socket,
@@ -218,8 +255,14 @@ impl Server {
                             )
                             .await
                         {
-                            Ok(_) => return Ok(()),
-                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                            Ok(_) => {
+                                debug!(discover_logger, "Offer sent");
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                debug!(discover_logger, "Failed to send offer");
+                                return Err(HandleError::FailedSendingReply());
+                            }
                         }
                     }
                     None => return Err(HandleError::NoAvailableLease()),
@@ -228,22 +271,31 @@ impl Server {
 
             // REQUEST
             Ok(options::MessageType::Request) => {
-                info!(logger, "Got REQUEST");
                 // Use request IP if specified, otherwise client IP
                 let req_ip = match packet.option(options::REQUESTED_IP_ADDRESS) {
                     Some(options::DhcpOption::RequestedIpAddress(ip)) => *ip,
                     _ => packet.ciaddr,
                 };
+                let request_logger =
+                    logger.new(o!("client ip" => req_ip.to_string(), "message_type" => "request"));
+                debug!(request_logger, "Got REQUEST");
 
                 match self.lease_block.reserve(&packet.chaddr, &req_ip).await {
                     Ok(_) => {
+                        info!(request_logger, "Reserved lease");
                         // We got a lease, send an ACK
                         match self
                             .server_reply(socket, src, options::MessageType::Ack, packet, &req_ip)
                             .await
                         {
-                            Ok(_) => return Ok(()),
-                            Err(_) => return Err(HandleError::FailedSendingReply()),
+                            Ok(_) => {
+                                debug!(request_logger, "Sent ACK");
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                debug!(request_logger, "Failed sending ACK");
+                                return Err(HandleError::FailedSendingReply());
+                            }
                         }
                     }
                     Err(_) => {
@@ -298,9 +350,8 @@ impl Server {
 
         let mut opts: Vec<options::DhcpOption> = Vec::with_capacity(options.len() + 2);
         opts.push(options::DhcpOption::DhcpMessageType(msg_type));
-        opts.push(options::DhcpOption::ServerIdentifier(
-            *self.config.bind_address.ip(),
-        ));
+        opts.push(options::DhcpOption::ServerIdentifier(self.config.server_ip));
+        opts.extend(options);
 
         self.send(
             socket,
@@ -330,6 +381,12 @@ impl Server {
         packet: &packet::Packet,
         offer_ip: &Ipv4Addr,
     ) -> std::io::Result<usize> {
+        let lease_secs = self.lease_block.lease_duration.as_secs() as u32;
+        let logger = self
+            .logger
+            .new(o!("routine" => "server_reply", "lease duration" => lease_secs));
+        debug!(logger, "sending reply");
+
         self.reply(
             socket,
             src,
@@ -337,9 +394,7 @@ impl Server {
             packet,
             offer_ip,
             vec![
-                options::DhcpOption::IpAddressLeaseTime(
-                    self.lease_block.lease_duration.as_secs() as u32
-                ),
+                options::DhcpOption::IpAddressLeaseTime(lease_secs),
                 options::DhcpOption::SubnetMask(self.lease_block.subnet_mask),
                 options::DhcpOption::Router(self.lease_block.routers.clone()),
                 options::DhcpOption::DomainNameServer(self.lease_block.domain_servers.clone()),
@@ -383,7 +438,7 @@ mod tests {
     const CLIENT_PORT: u16 = 8999;
     const CLIENT_HWADDR: &[u8; 6] = b"000000";
 
-    fn discoverPacket() -> dhcp4r::packet::Packet {
+    fn discover_packet() -> dhcp4r::packet::Packet {
         return dhcp4r::packet::Packet {
             reply: false,
             hops: 0,
@@ -401,7 +456,7 @@ mod tests {
         };
     }
 
-    fn requestPacket() -> dhcp4r::packet::Packet {
+    fn request_packet() -> dhcp4r::packet::Packet {
         return dhcp4r::packet::Packet {
             reply: false,
             hops: 0,
@@ -427,7 +482,8 @@ mod tests {
         let logger = slog::Logger::root(drain, o!());
 
         let config = Config {
-            bind_address: SocketAddrV4::new(SERVER_IP, SERVER_PORT),
+            server_ip: SERVER_IP,
+            listen_port: SERVER_PORT,
             bind_interface: None,
             lease_start: Ipv4Addr::new(10, 41, 0, 0),
             lease_count: 24,
@@ -465,7 +521,7 @@ mod tests {
 
         // Send discover
         let buff: &mut [u8; 1500] = &mut [0; 1500];
-        discoverPacket().encode(buff);
+        discover_packet().encode(buff);
         match client_sock
             .send_to(buff, std::net::SocketAddrV4::new(SERVER_IP, SERVER_PORT))
             .await
@@ -486,7 +542,7 @@ mod tests {
         }
 
         // Send request
-        let mut req_packet = requestPacket();
+        let mut req_packet = request_packet();
         req_packet
             .options
             .push(dhcp4r::options::DhcpOption::RequestedIpAddress(

@@ -1,7 +1,8 @@
+use serde_derive::Serialize;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{ RwLock, RwLockReadGuard };
 
 #[derive(Debug)]
 pub enum LeaseError {
@@ -18,9 +19,11 @@ impl std::fmt::Display for LeaseError {
     }
 }
 
+#[derive(Clone, Serialize)]
 pub struct Lease {
-    chaddr: [u8; 6],
-    expires: Instant,
+    pub chaddr: [u8; 6],
+    #[serde(with = "serde_millis")]
+    pub expires: Instant,
 }
 
 impl Lease {
@@ -156,13 +159,18 @@ impl LeaseBlock {
         }
     }
 
-    pub async fn reserve(&mut self, chaddr: &[u8; 6], addr: &Ipv4Addr) -> Result<(), LeaseError> {
+    pub async fn reserve(&self, chaddr: &[u8; 6], addr: &Ipv4Addr) -> Result<(), LeaseError> {
         let mut state_guard = self.state.write().await;
         return state_guard.reserve(chaddr, addr, self.lease_duration);
     }
 
     pub fn release(&self, chaddr: &[u8; 6], addr: &Ipv4Addr) -> Result<(), LeaseError> {
         Ok(())
+    }
+
+    pub async fn leases<'a>(&self) -> HashMap<Ipv4Addr, Lease> {
+        let state_guard = self.state.read().await;
+        return state_guard.lease_by_ip.clone();
     }
 }
 

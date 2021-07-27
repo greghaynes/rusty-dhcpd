@@ -3,7 +3,8 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct Config {
-    pub bind_address: SocketAddrV4,
+    pub server_ip: Ipv4Addr,
+    pub listen_port: u16,
     pub bind_interface: Option<String>,
     pub lease_start: Ipv4Addr,
     pub lease_count: u32,
