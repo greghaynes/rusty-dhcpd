@@ -4,6 +4,7 @@ use crate::web::schemas;
 use std::convert::From;
 use std::convert::Infallible;
 use std::sync::Arc;
+use warp::Filter;
 
 impl From<&leases::LeaseBlock> for schemas::LeaseBlock {
     fn from(dhcpd_block: &leases::LeaseBlock) -> Self {
@@ -29,4 +30,14 @@ pub async fn leases_handler(
         leases.push(web_block);
     }
     return Ok(warp::reply::json(&leases));
+}
+
+fn with_dhcpd(dhcpd: Arc<dyn AbstractServer>) -> impl Filter<Extract = (Arc<dyn AbstractServer>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || dhcpd.clone())
+}
+
+pub fn filters(dhcpd: Arc<dyn AbstractServer>) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::path("leases")
+        .and(with_dhcpd(dhcpd))
+        .and_then(leases_handler)
 }

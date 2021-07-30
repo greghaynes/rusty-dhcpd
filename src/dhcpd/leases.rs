@@ -1,5 +1,7 @@
+use crate::config::Config;
 use serde_derive::Serialize;
 use std::collections::HashMap;
+use std::convert::From;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -171,6 +173,19 @@ impl LeaseBlock {
     pub async fn leases<'a>(&self) -> HashMap<Ipv4Addr, Lease> {
         let state_guard = self.state.read().await;
         return state_guard.lease_by_ip.clone();
+    }
+}
+
+impl From<&Config> for LeaseBlock {
+    fn from(config: &Config) -> LeaseBlock {
+        LeaseBlock::create(
+            config.lease_start,
+            config.lease_count,
+            config.lease_duration,
+            config.lease_subnet_mask,
+            config.lease_routers.clone(),
+            config.lease_domain_servers.clone(),
+        )
     }
 }
 

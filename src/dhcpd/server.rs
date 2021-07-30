@@ -73,19 +73,12 @@ impl AbstractServer for Server {
 }
 
 impl Server {
-    pub fn create(config: &config::Config, logger: slog::Logger) -> Server {
+    pub fn create(config: &config::Config, lease_block: leases::LeaseBlock, logger: slog::Logger) -> Server {
         let srv_logger = logger.new(o!("module" => "server"));
 
         return Server {
             config: config.clone(),
-            lease_block: leases::LeaseBlock::create(
-                config.lease_start,
-                config.lease_count,
-                config.lease_duration,
-                config.lease_subnet_mask,
-                config.lease_routers.clone(),
-                config.lease_domain_servers.clone(),
-            ),
+            lease_block: lease_block,
             logger: srv_logger,
         };
     }
@@ -421,6 +414,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
+    use crate::dhcpd::leases;
 
     use slog::Drain;
     use std::net::{Ipv4Addr, SocketAddrV4};
@@ -488,6 +482,7 @@ mod tests {
             lease_routers: vec![Ipv4Addr::new(10, 41, 1, 1)],
             lease_domain_servers: vec![Ipv4Addr::new(8, 8, 8, 8)],
         };
+        let lease_block = leases::LeaseBlock::from(&config);
 
         let shutdown = Arc::new(Notify::new());
 
@@ -495,7 +490,7 @@ mod tests {
         let shutdown_bg = shutdown.clone();
 
         let srv_handle = tokio::spawn(async move {
-            let srv = super::Server::create(&config, logger);
+            let srv = super::Server::create(&config, lease_block, logger);
             match srv.serve(shutdown_bg).await {
                 Ok(_) => {}
                 Err(err) => assert!(false, "Failed to run server: {}", err),

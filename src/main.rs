@@ -7,11 +7,11 @@ extern crate slog;
 extern crate slog_async;
 extern crate slog_term;
 
+use dhcpd::leases;
 use slog::Drain;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
-use warp::Filter;
 
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 60, 0, 1);
 const SERVER_PORT: u16 = 9067;
@@ -41,18 +41,14 @@ fn init_logging() -> slog::Logger {
 async fn main() {
     let logger = init_logging();
     let config = init_config();
+    let lease_block = leases::LeaseBlock::from(&config);
 
     let dhcp_shutdown = Arc::new(tokio::sync::Notify::new());
 
-    let dhcp_srv = Arc::new(dhcpd::server::Server::create(&config, logger));
+    let dhcp_srv = Arc::new(dhcpd::server::Server::create(&config, lease_block, logger));
     let dhcp_srv_web = dhcp_srv.clone();
 
-    let dhcp_srv_filter =
-        warp::any().map(move || -> Arc<dyn dhcpd::server::AbstractServer> { dhcp_srv_web.clone() });
-    let leases = warp::path("leases")
-        .and(dhcp_srv_filter)
-        .and_then(web::handlers::leases_handler);
-    let routes = leases;
+    let routes = web::handlers::filters(dhcp_srv_web);
 
     tokio::select! {
         _ = dhcp_srv.serve(dhcp_shutdown) => {},
