@@ -73,7 +73,11 @@ impl AbstractServer for Server {
 }
 
 impl Server {
-    pub fn create(config: &config::Config, lease_block: leases::LeaseBlock, logger: slog::Logger) -> Server {
+    pub fn create(
+        config: &config::Config,
+        lease_block: leases::LeaseBlock,
+        logger: slog::Logger,
+    ) -> Server {
         let srv_logger = logger.new(o!("module" => "server"));
 
         return Server {
