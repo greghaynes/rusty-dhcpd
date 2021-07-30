@@ -59,7 +59,7 @@ impl std::fmt::Display for ListenError {
 }
 
 #[async_trait]
-pub trait AbstractServer : Send + Sync {
+pub trait AbstractServer: Send + Sync {
     async fn leases(&self) -> HashMap<Ipv4Addr, leases::Lease>;
 }
 
@@ -171,7 +171,7 @@ impl Server {
                 _ = socket.readable() => {
                     match socket.try_recv_from(&mut buf) {
                         Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buf[..n]) {
-                            Err(e) => {
+                            Err(_) => {
                                 info!(logger, "Failed parsing received packet");
                                 return Err(HandleError::PacketError());
                             }
@@ -499,7 +499,7 @@ mod tests {
         let shutdown_bg = shutdown.clone();
 
         let srv_handle = tokio::spawn(async move {
-            let mut srv = super::Server::create(&config, logger);
+            let srv = super::Server::create(&config, logger);
             match srv.serve(shutdown_bg).await {
                 Ok(_) => {}
                 Err(err) => assert!(false, "Failed to run server: {}", err),
@@ -532,7 +532,7 @@ mod tests {
 
         // Get discover response
         match client_sock.recv_from(buff).await {
-            Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
+            Ok((n, _)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
                 Err(_) => assert!(false, "Failed to parse discover response"),
                 Ok(packet) => {
                     assert_eq!(packet.yiaddr, Ipv4Addr::new(10, 41, 0, 0));
@@ -559,7 +559,7 @@ mod tests {
 
         // Got request response
         match client_sock.recv_from(buff).await {
-            Ok((n, addr)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
+            Ok((n, _)) => match dhcp4r::packet::Packet::from(&buff[..n]) {
                 Err(_) => assert!(false, "Failed to parse request response"),
                 Ok(packet) => {
                     assert_eq!(packet.yiaddr, Ipv4Addr::new(10, 41, 0, 0));

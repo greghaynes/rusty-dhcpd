@@ -2,7 +2,7 @@ use serde_derive::Serialize;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
-use tokio::sync::{ RwLock, RwLockReadGuard };
+use tokio::sync::RwLock;
 
 #[derive(Debug)]
 pub enum LeaseError {
@@ -194,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn next_available() {
         let mut chaddr: [u8; 6] = [0; 6];
-        let mut block = create_block();
+        let block = create_block();
         match block.next_available(&chaddr).await {
             Some(addr) => assert_eq!(addr, Ipv4Addr::new(10, 10, 0, 10)),
             None => assert!(false, "Expected IP address but got none"),

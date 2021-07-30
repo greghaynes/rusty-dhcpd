@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 #[derive(Clone)]

@@ -1,6 +1,6 @@
 mod config;
-mod leases;
 mod dhcpd;
+mod leases;
 mod web;
 
 #[macro_use]
@@ -12,7 +12,6 @@ use slog::Drain;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
 use warp::Filter;
 
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 60, 0, 1);
@@ -39,7 +38,7 @@ fn init_logging() -> slog::Logger {
     return slog::Logger::root(drain, o!());
 }
 
-static INDEX_HTML:&str = r#"<!DOCTYPE html>
+static INDEX_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
   <body>
     <h1>HELLO</h1>
@@ -58,8 +57,9 @@ async fn main() {
     let dhcp_srv_web = dhcp_srv.clone();
 
     let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
-    
-    let dhcp_srv_filter = warp::any().map(move || -> Arc<dyn dhcpd::AbstractServer> {dhcp_srv_web.clone()});
+
+    let dhcp_srv_filter =
+        warp::any().map(move || -> Arc<dyn dhcpd::AbstractServer> { dhcp_srv_web.clone() });
     let leases = warp::path("leases")
         .and(dhcp_srv_filter)
         .and_then(web::leases_handler);
@@ -74,6 +74,5 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn leases_integration() {
-    }
+    async fn leases_integration() {}
 }
