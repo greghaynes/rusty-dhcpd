@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use dhcp4r::{options, packet};
 use nix::sys::socket::setsockopt;
 use nix::sys::socket::sockopt::BindToDevice;
@@ -57,7 +56,6 @@ impl std::fmt::Display for ListenError {
     }
 }
 
-#[async_trait]
 pub trait AbstractServer: Send + Sync {
     fn leases(&self) -> Vec<&leases::LeaseBlock>;
 }
@@ -68,7 +66,6 @@ pub struct Server {
     logger: slog::Logger,
 }
 
-#[async_trait]
 impl AbstractServer for Server {
     fn leases(&self) -> Vec<&leases::LeaseBlock> {
         return vec![&self.lease_block];
