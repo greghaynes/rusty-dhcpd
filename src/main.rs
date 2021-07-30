@@ -1,6 +1,5 @@
 mod config;
 mod dhcpd;
-mod leases;
 mod web;
 
 #[macro_use]
@@ -38,14 +37,6 @@ fn init_logging() -> slog::Logger {
     return slog::Logger::root(drain, o!());
 }
 
-static INDEX_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-  <body>
-    <h1>HELLO</h1>
-  </body>
-</html>
-"#;
-
 #[tokio::main]
 async fn main() {
     let logger = init_logging();
@@ -53,26 +44,18 @@ async fn main() {
 
     let dhcp_shutdown = Arc::new(tokio::sync::Notify::new());
 
-    let dhcp_srv = Arc::new(dhcpd::Server::create(&config, logger));
+    let dhcp_srv = Arc::new(dhcpd::server::Server::create(&config, logger));
     let dhcp_srv_web = dhcp_srv.clone();
 
-    let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
-
     let dhcp_srv_filter =
-        warp::any().map(move || -> Arc<dyn dhcpd::AbstractServer> { dhcp_srv_web.clone() });
+        warp::any().map(move || -> Arc<dyn dhcpd::server::AbstractServer> { dhcp_srv_web.clone() });
     let leases = warp::path("leases")
         .and(dhcp_srv_filter)
-        .and_then(web::leases_handler);
-    let routes = index.or(leases);
+        .and_then(web::handlers::leases_handler);
+    let routes = leases;
 
     tokio::select! {
         _ = dhcp_srv.serve(dhcp_shutdown) => {},
         _ = warp::serve(routes).run(([0, 0, 0, 0], 3030)) => {}
     }
-}
-
-#[cfg(test)]
-mod tests {
-    #[tokio::test]
-    async fn leases_integration() {}
 }

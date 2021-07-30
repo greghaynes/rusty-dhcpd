@@ -176,7 +176,6 @@ impl LeaseBlock {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::net::Ipv4Addr;
     use std::time::{Duration, Instant};
 

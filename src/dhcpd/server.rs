@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use dhcp4r::{options, packet};
 use nix::sys::socket::setsockopt;
 use nix::sys::socket::sockopt::BindToDevice;
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::os::unix::io::AsRawFd;
@@ -12,7 +11,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 
 use crate::config;
-use crate::leases;
+use crate::dhcpd::leases;
 
 #[derive(Debug)]
 pub enum HandleError {
@@ -60,7 +59,7 @@ impl std::fmt::Display for ListenError {
 
 #[async_trait]
 pub trait AbstractServer: Send + Sync {
-    async fn leases(&self) -> HashMap<Ipv4Addr, leases::Lease>;
+    fn leases(&self) -> Vec<&leases::LeaseBlock>;
 }
 
 pub struct Server {
@@ -71,8 +70,8 @@ pub struct Server {
 
 #[async_trait]
 impl AbstractServer for Server {
-    async fn leases(&self) -> HashMap<Ipv4Addr, leases::Lease> {
-        return self.lease_block.leases().await;
+    fn leases(&self) -> Vec<&leases::LeaseBlock> {
+        return vec![&self.lease_block];
     }
 }
 
