@@ -8,8 +8,8 @@ edition = "2018"
 
 [dependencies]
 dhcp4r = "0.2"
-nix = "0.19"
-nom = "6"
+nix = "0.26.2"
+nom = "7"
 serde = "1"
 serde_derive = "1"
 serde_millis = "0.1"
